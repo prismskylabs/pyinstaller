@@ -1,28 +1,22 @@
 #! /usr/bin/env python
-# encoding: utf-8
+#-----------------------------------------------------------------------------
+# Copyright (c) 2013, PyInstaller Development Team.
 #
-# Bootloader building script.
+# Distributed under the terms of the GNU General Public License with exception
+# for distributing bootloader.
 #
-# Copyright (C) 2010-2012, Martin Zibricky
-#
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+# The full license is in the file COPYING.txt, distributed with this software.
+#-----------------------------------------------------------------------------
 
 
+"""
+Bootloader building script.
+"""
+
+
+import os
 import platform
 import sys
-from distutils import sysconfig as _sysconfig
 
 import Utils
 import Options
@@ -37,11 +31,27 @@ APPNAME=''
 top = '.'
 out = 'build'
 
-# TODO extensive testing with different configuration (should work with Python >= 2.3)
+
+# TODO use following variable only on darwin and for 32bit loader.
+# OS X 10.5 doesn't understand the load command  'LC_DYLD_INFO_ONLY'
+# that is used by the OS X 10.6 linker.
+# The following variable fixes 10.5 compatibility.
+os.environ['MACOSX_DEPLOYMENT_TARGET'] = '10.5'
+
+
+# TODO strip created binaries.
+
 
 def set_options(opt):
     myplatform = Utils.detect_platform()
     
+    if not myplatform.startswith('win'):
+        opt.add_option('--leak-detector',
+                action = 'store_true',
+                help = 'Link with Boehm garbage collector to detect memory leaks.',
+                default = False,
+                dest = 'boehmgc')
+
     if myplatform.startswith('linux'):
         opt.add_option('--no-lsb',
                 action = 'store_true',
@@ -60,7 +70,6 @@ def set_options(opt):
                 dest = 'lsb_version')
 
     opt.tool_options('compiler_cc')
-
 
 
 def configure(conf):
@@ -113,7 +122,7 @@ def configure(conf):
                 # msvc 7.1 (Visual Studio 2003)
                 # msvc 8.0 (Visual Studio 2005)
                 # msvc 9.0 (Visual Studio 2008)
-                #conf.env['MSVC_VERSIONS'] = ['msvc 7.1', 'msvc 8.0', 'msvc 9.0']
+                conf.env['MSVC_VERSIONS'] = ['msvc 7.1', 'msvc 8.0', 'msvc 9.0', 'wsdk 7.0', 'wsdk 7.1']
                 if myarch == '32bit':
                     conf.env['MSVC_TARGETS'] = ['x86', 'ia32']
                 elif myarch == '64bit':
@@ -182,17 +191,20 @@ def configure(conf):
         # make sure we don't use declarations after statement (break Visual Studio)
         conf.env.append_value('CCFLAGS', '-Wdeclaration-after-statement')
         conf.env.append_value('CCFLAGS', '-Werror')
-    else:
+
+    if not myplatform.startswith('win'):
         # Defines common for Unix and Unix-like platforms.
         # For details see:
         #   http://man.he.net/man7/feature_test_macros
         #
-        # Without these definitions compiling maight fail on OSX.
+        ## Without these definitions compiling maight fail on OSX.
         conf.env.append_value('CCDEFINES', '_POSIX_C_SOURCE=200112L')
         # SUS v2 (UNIX 98) definitions.
         #   Mac OS X 10.5 is UNIX 03 compliant.
         conf.env.append_value('CCDEFINES', '_XOPEN_SOURCE=500')
         conf.env.append_value('CCDEFINES', '_REENTRANT')
+        # Function 'mkdtemp' is available only if _BSD_SOURCE is defined.
+        conf.env.append_value('CCDEFINES', '_BSD_SOURCE')
         
 
     if myplatform.startswith('win'):
@@ -205,7 +217,7 @@ def configure(conf):
     if myplatform.startswith('aix'):
         conf.env.append_value('CCDEFINES', 'AIX')
 
-    conf.env.append_value('CPPPATH', '../common')
+    conf.env.append_value('CPPPATH', os.path.join('..', 'common'))
 
 
     ### Libraries
@@ -222,6 +234,14 @@ def configure(conf):
         if conf.check_cc(function_name='readlink', header_name='unistd.h'):
             conf.env.append_value('CCFLAGS', '-DHAVE_READLINK')
 
+        # This uses Boehm GC to manage memory - it replaces malloc() / free()
+        # functions. Some messages are printed if memory is not deallocated.
+        if opt.boehmgc:
+            conf.check_cc(lib='gc', mandatory=True)
+            conf.env.append_value('CCDEFINES', 'PYI_LEAK_DETECTOR')
+            conf.env.append_value('CCDEFINES', 'GC_FIND_LEAK')
+            conf.env.append_value('CCDEFINES', 'GC_DEBUG')
+            conf.env.append_value('CCDEFINES', 'SAVE_CALL_CHAIN')
 
     ### ccflags
 
@@ -239,8 +259,8 @@ def configure(conf):
             conf.env.append_value('LINKFLAGS', '/MACHINE:X86')
         elif myarch == '64bit':
             conf.env.append_value('LINKFLAGS', '/MACHINE:X64')
-            # enable 64bit porting warnings
-            conf.env.append_value('CCFLAGS', '/Wp64')
+        # Enable 64bit porting warnings and other warnings too.
+        conf.env.append_value('CCFLAGS', '/W3')
         # We use SEH exceptions in winmain.c; make sure they are activated.
         conf.env.append_value('CCFLAGS', '/EHa')
     
@@ -265,6 +285,14 @@ def configure(conf):
         conf.env.append_value('LINKFLAGS', '-arch')
         conf.env.append_value('LINKFLAGS', mac_arch)
 
+        if myarch == '32bit':
+            conf.env.append_value('CCFLAGS', '-mmacosx-version-min=10.5')
+        else:
+            conf.env.append_value('CCFLAGS', '-mmacosx-version-min=10.6')
+
+        
+
+       
     # On linux link only with needed libraries.
     # -Wl,--as-needed is on some platforms detected during configure but
     # fails during build. (Mac OS X, Solaris, AIX)
@@ -274,9 +302,6 @@ def configure(conf):
 
 
     ### Other stuff
-
-    if myplatform.startswith('darwin'):
-        conf.env.MACOSX_DEPLOYMENT_TARGET = '10.5'
 
     if myplatform.startswith('win'):
         # RC file - icon
@@ -295,8 +320,9 @@ def configure(conf):
     dbg.set_variant('debug') # separate subfolder for building
     conf.set_env_name('debug', dbg)
     conf.setenv('debug')
-    conf.env.append_value('CCDEFINES', '_DEBUG LAUNCH_DEBUG'.split())
-    conf.env.append_value('CCFLAGS', conf.env.CCFLAGS_DEBUG)
+    # This define enables verbose console output of the bootloader.
+    conf.env.append_value('CCDEFINES', ['LAUNCH_DEBUG'])
+    conf.env.append_value('CCDEFINES', 'NDEBUG')
     dbgw = conf.env.copy() # WINDOWED DEBUG environment
     dbgw.set_variant('debugw') # separate subfolder for building
     dbgw.detach()
@@ -309,9 +335,14 @@ def configure(conf):
     if myplatform.startswith('win') and conf.env.CC_NAME == 'gcc':
             conf.env.append_value('LINKFLAGS', '-mwindows')
     elif myplatform.startswith('darwin'):
-        conf.env.append_value('CCFLAGS', '-I/Developer/Headers/FlatCarbon')
+        #conf.env.append_value('CCFLAGS', '-I/Developer/Headers/FlatCarbon')
+        # To support catching AppleEvents and running as ordinary OSX GUI app,
+        # we have to link against the Carbon framework.
+        # This linkage only needs to be there for the windowed bootloaders.
         conf.env.append_value('LINKFLAGS', '-framework')
         conf.env.append_value('LINKFLAGS', 'Carbon')
+        # conf.env.append_value('LINKFLAGS', '-framework')
+        # conf.env.append_value('LINKFLAGS', 'ApplicationServices')
 
 
     ## setup RELEASE environment
@@ -331,18 +362,28 @@ def configure(conf):
     if myplatform.startswith('win') and conf.env.CC_NAME == 'gcc':
             conf.env.append_value('LINKFLAGS', '-mwindows')
     elif myplatform.startswith('darwin'):
+        # To support catching AppleEvents and running as ordinary OSX GUI app,
+        # we have to link against the Carbon framework.
+        # This linkage only needs to be there for the windowed bootloaders.
         conf.env.append_value('LINKFLAGS', '-framework')
-        conf.env.append_value('LINKFLAGS', 'ApplicationServices')
+        conf.env.append_value('LINKFLAGS', 'Carbon')
+        # TODO Do we need to link with this framework?
+        # conf.env.append_value('LINKFLAGS', '-framework')
+        # conf.env.append_value('LINKFLAGS', 'ApplicationServices')
 
 
+# TODO Use 'strip' command to decrease the size of compiled bootloaders.
 def build(bld):
+    myplatform = Utils.detect_platform()
+    opt = Options.options
+
     # Force to run with 1 job (no parallel building).
     # There are reported build failures on multicore CPUs
     # with some msvc versions.
-    Options.options.jobs = 1
+    # TODO revisit parallel building with switch to waf 1.7
+    opt.jobs = 1
 
-    myplatform = Utils.detect_platform()
-    install_path = '../../support/loader/' + platform.system() + "-" + bld.env.MYARCH
+    install_path = '../../PyInstaller/bootloader/' + platform.system() + "-" + bld.env.MYARCH
     if bld.env.MYMACHINE:
         install_path += '-' + bld.env.MYMACHINE
     targets = dict(release='run', debug='run_d', releasew='runw', debugw='runw_d')
@@ -357,6 +398,7 @@ def build(bld):
                 source = bld.path.ant_glob('zlib/*.c'),
                 target = 'staticlib_zlib',
                 env = bld.env_of_name(key),
+                includes = ['zlib'],
             )
 
         # console
@@ -370,6 +412,7 @@ def build(bld):
                 uselib_local = 'staticlib_zlib',
                 uselib = 'USER32 COMCTL32 KERNEL32 WS2_32',
                 env = bld.env_of_name(key).copy(),
+                includes = ['common', 'windows', 'zlib'],
             )
 
         # windowed
@@ -383,6 +426,7 @@ def build(bld):
                 uselib_local = 'staticlib_zlib',
                 uselib = 'USER32 COMCTL32 KERNEL32 WS2_32',
                 env = bld.env_of_name(key).copy(),
+                includes = ['common', 'windows', 'zlib'],
             )
 
         ## inprocsrvr console
@@ -397,13 +441,14 @@ def build(bld):
         for key, value in dict(release='inprocsrvr', debug='inprocsrvr_d').items():
             bld(
                 features = 'cc cshlib',
-                source = bld.path.ant_glob('common/pyi_utils.c common/pyi_python.c common/pyi_archive.c common/pyi_pythonlib.c common/launch.c windows/dllmain.c'),
+                source = bld.path.ant_glob('common/pyi_*.c windows/*.c'),
                 target = value,
                 install_path = install_path,
                 uselib_local = 'staticlib_zlib',
                 uselib = 'USER32 COMCTL32 KERNEL32 WS2_32',
                 env = bld.env_of_name(key).copy(),
-                linkflags = linkflags_c
+                linkflags = linkflags_c,
+                includes = ['common', 'windows', 'zlib'],
             )
 
         ## inprocsrvr windowed
@@ -411,16 +456,21 @@ def build(bld):
         for key, value in dict(releasew='inprocsrvrw', debugw='inprocsrvrw_d').items():
             bld(
                 features = 'cc cshlib',
-                source = bld.path.ant_glob('common/pyi_utils.c common/pyi_python.c common/pyi_archive.c common/pyi_pythonlib.c common/launch.c windows/dllmain.c'),
+                source = bld.path.ant_glob('common/pyi_*.c windows/*.c'),
                 target = value,
                 install_path = install_path,
                 uselib_local = 'staticlib_zlib',
                 uselib = 'USER32 COMCTL32 KERNEL32 WS2_32',
                 env = bld.env_of_name(key).copy(),
-                linkflags = linkflags_w
+                linkflags = linkflags_w,
+                includes = ['common', 'windows', 'zlib'],
             )
 
     else: # linux, darwin (MacOSX)
+
+        libs = ['dl', 'z', 'm']  # 'z' - zlib, 'm' - math,
+        if opt.boehmgc:
+            libs.append('gc')
 
         for key, value in targets.items():
             bld(
@@ -428,6 +478,7 @@ def build(bld):
                 source = bld.path.ant_glob('linux/*.c common/*.c'),
                 target = value,
                 install_path = install_path,
-                uselib = 'DL Z', # 'z' - zlib
+                lib = libs,
                 env = bld.env_of_name(key).copy(),
+                includes = ['common', 'linux'],
             )

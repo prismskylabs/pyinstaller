@@ -1,20 +1,12 @@
+#-----------------------------------------------------------------------------
+# Copyright (c) 2013, PyInstaller Development Team.
 #
-# Copyright (C) 2011 by Hartmut Goebel
+# Distributed under the terms of the GNU General Public License with exception
+# for distributing bootloader.
 #
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation; either version 2 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
-# 02110-1301, USA
+# The full license is in the file COPYING.txt, distributed with this software.
+#-----------------------------------------------------------------------------
+
 
 __all__ = ('HOMEPATH', 'CONFIGDIR', 'PLATFORM',
            'VERSION', 'get_version',
@@ -40,7 +32,9 @@ sys.path.insert(0, lib.__path__[0])
 from PyInstaller import compat
 from PyInstaller.utils import git
 
-VERSION = (2, 1, 0, 'dev', git.get_repo_revision())
+# Uncomment this line for development of version 3.0.
+#VERSION = (3, 0, 0, 'dev', git.get_repo_revision())
+VERSION = (2, 1, 0)
 
 
 is_py25 = compat.is_py25
@@ -58,7 +52,21 @@ is_aix = compat.is_aix
 is_unix = compat.is_unix
 
 
+# This ensures PyInstaller will work on Windows with paths containing
+# foreign characters.
 HOMEPATH = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+if is_win:
+    try:
+        unicode(HOMEPATH)
+    except UnicodeDecodeError:
+        # Do conversion to ShortPathName really only in case HOMEPATH is not
+        # ascii only - conversion to unicode type cause this unicode error.
+        try:
+            import win32api
+            HOMEPATH = win32api.GetShortPathName(HOMEPATH)
+        except ImportError:
+            pass
+
 
 if is_win:
     CONFIGDIR = compat.getenv('APPDATA')
@@ -75,6 +83,16 @@ else:
 CONFIGDIR = os.path.join(CONFIGDIR, 'pyinstaller')
 
 
+## Default values of paths where to put files created by PyInstaller.
+# Folder where to put created .spec file.
+DEFAULT_SPECPATH = compat.getcwd()
+# Folder where to put created .spec file.
+# Where to put the final app.
+DEFAULT_DISTPATH = os.path.join(compat.getcwd(), 'dist')
+# Where to put all the temporary work files, .log, .pyz and etc.
+DEFAULT_WORKPATH = os.path.join(compat.getcwd(), 'build')
+
+
 PLATFORM = compat.system() + '-' + compat.architecture()
 # Include machine name in path to bootloader for some machines.
 # e.g. 'arm'
@@ -83,7 +101,7 @@ if compat.machine():
 
 
 # path extensions for module seach
-# :fixme: this should not be a global variable
+# FIXME this should not be a global variable
 __pathex__ = []
 
 

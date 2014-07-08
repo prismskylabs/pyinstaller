@@ -1,14 +1,33 @@
+#-----------------------------------------------------------------------------
+# Copyright (c) 2013, PyInstaller Development Team.
+#
+# Distributed under the terms of the GNU General Public License with exception
+# for distributing bootloader.
+#
+# The full license is in the file COPYING.txt, distributed with this software.
+#-----------------------------------------------------------------------------
+
 
 import glob
 import os
 import sys
 import PyInstaller
 import PyInstaller.compat as compat
-from PyInstaller.compat import is_darwin
+from PyInstaller.compat import is_darwin, is_win
 from PyInstaller.utils import misc
 
 import PyInstaller.log as logging
 logger = logging.getLogger(__name__)
+
+
+# Some hooks need to save some values. This is the dict that can be used for
+# that.
+#
+# When running tests this variable should be reseted before every test.
+#
+# For example the 'wx' module needs variable 'wxpubsub'. This tells PyInstaller
+# which protocol of the wx module should be bundled.
+hook_variables = {}
 
 
 def __exec_python_cmd(cmd):
@@ -21,7 +40,7 @@ def __exec_python_cmd(cmd):
     pp = os.pathsep.join(PyInstaller.__pathex__)
     old_pp = compat.getenv('PYTHONPATH')
     if old_pp:
-        pp = os.pathsep.join([pp, old_pp])
+        pp = os.pathsep.join([old_pp, pp])
     compat.setenv("PYTHONPATH", pp)
     try:
         try:
@@ -44,22 +63,27 @@ def exec_statement(statement):
     return __exec_python_cmd(cmd)
 
 
-def exec_script(scriptfilename, *args):
+def exec_script(script_filename, *args):
     """
     Executes a Python script in an externally spawned interpreter, and
     returns anything that was emitted in the standard output as a
     single string.
 
     To prevent missuse, the script passed to hookutils.exec-script
-    must be located in the `hooks` directory.
+    must be located in the `hooks/utils` directory.
     """
-
-    if scriptfilename != os.path.basename(scriptfilename):
+    script_filename = os.path.join('utils', os.path.basename(script_filename))
+    script_filename = os.path.join(os.path.dirname(__file__), script_filename)
+    if not os.path.exists(script_filename):
         raise SystemError("To prevent missuse, the script passed to "
                           "hookutils.exec-script must be located in "
-                          "the `hooks` directory.")
+                          "the `hooks/utils` directory.")
 
-    cmd = [os.path.join(os.path.dirname(__file__), scriptfilename)]
+    # Scripts might be importing some modules. Add PyInstaller code to pathex.
+    pyinstaller_root_dir = os.path.dirname(os.path.abspath(PyInstaller.__path__[0]))
+    PyInstaller.__pathex__.append(pyinstaller_root_dir)
+
+    cmd = [script_filename]
     cmd.extend(args)
     return __exec_python_cmd(cmd)
 
@@ -151,7 +175,7 @@ def qt4_phonon_plugins_dir():
 
 
 def qt4_plugins_binaries(plugin_type):
-    """Return list of dynamic libraries formated for mod.binaries."""
+    """Return list of dynamic libraries formatted for mod.binaries."""
     binaries = []
     pdir = qt4_plugins_dir()
     files = misc.dlls_in_dir(os.path.join(pdir, plugin_type))
@@ -163,13 +187,21 @@ def qt4_plugins_binaries(plugin_type):
 
 
 def qt4_menu_nib_dir():
-    """Return path to Qt resource dir qt_menu.nib."""
+    """Return path to Qt resource dir qt_menu.nib. OSX only"""
     menu_dir = ''
     # Detect MacPorts prefix (usually /opt/local).
     # Suppose that PyInstaller is using python from macports.
     macports_prefix = sys.executable.split('/Library')[0]
-    # list of directories where to look for qt_menu.nib
-    dirs = [
+    
+    # list of directories where to look for qt_menu.nib    
+    dirs = []
+    # If PyQt4 is built against Qt5 look for the qt_menu.nib in a user
+    # specified location, if it exists.
+    if 'QT5DIR' in os.environ:
+        dirs.append(os.path.join(os.environ['QT5DIR'],
+                                 "src", "plugins", "platforms", "cocoa"))
+    
+    dirs += [
         # Qt4 from MacPorts not compiled as framework.
         os.path.join(macports_prefix, 'lib', 'Resources'),
         # Qt4 from MacPorts compiled as framework.
@@ -194,33 +226,198 @@ def qt4_menu_nib_dir():
             break
 
     if not menu_dir:
-        logger.error('Cannont find qt_menu.nib directory')
+        logger.error('Cannot find qt_menu.nib directory')
     return menu_dir
 
+def qt5_plugins_dir():
+    qt5_plugin_dirs = eval_statement(
+        "from PyQt5.QtCore import QCoreApplication;"
+        "app=QCoreApplication([]);"
+        "print map(unicode,app.libraryPaths())")
+    if not qt5_plugin_dirs:
+        logger.error("Cannot find PyQt5 plugin directories")
+        return ""
+    for d in qt5_plugin_dirs:
+        if os.path.isdir(d):
+            return str(d)  # must be 8-bit chars for one-file builds
+    logger.error("Cannot find existing PyQt5 plugin directory")
+    return ""
+
+
+def qt5_phonon_plugins_dir():
+    qt5_plugin_dirs = eval_statement(
+        "from PyQt5.QtGui import QApplication;"
+        "app=QApplication([]); app.setApplicationName('pyinstaller');"
+        "from PyQt5.phonon import Phonon;"
+        "v=Phonon.VideoPlayer(Phonon.VideoCategory);"
+        "print map(unicode,app.libraryPaths())")
+    if not qt5_plugin_dirs:
+        logger.error("Cannot find PyQt5 phonon plugin directories")
+        return ""
+    for d in qt5_plugin_dirs:
+        if os.path.isdir(d):
+            return str(d)  # must be 8-bit chars for one-file builds
+    logger.error("Cannot find existing PyQt5 phonon plugin directory")
+    return ""
+
+
+def qt5_plugins_binaries(plugin_type):
+    """Return list of dynamic libraries formatted for mod.binaries."""
+    binaries = []
+    pdir = qt5_plugins_dir()
+    files = misc.dlls_in_dir(os.path.join(pdir, plugin_type))
+    for f in files:
+        binaries.append((
+            os.path.join('qt5_plugins', plugin_type, os.path.basename(f)),
+            f, 'BINARY'))
+    return binaries
+
+def qt5_menu_nib_dir():
+    """Return path to Qt resource dir qt_menu.nib. OSX only"""
+    menu_dir = ''
+    
+    # If the QT5DIR env var is set then look there first. It should be set to the
+    # qtbase dir in the Qt5 distribution.
+    dirs = []
+    if 'QT5DIR' in os.environ:
+        dirs.append(os.path.join(os.environ['QT5DIR'],
+                                 "src", "plugins", "platforms", "cocoa"))
+
+    # As of the time of writing macports doesn't yet support Qt5. So this is
+    # just modified from the Qt4 version.
+    # FIXME: update this when MacPorts supports Qt5
+    # Detect MacPorts prefix (usually /opt/local).
+    # Suppose that PyInstaller is using python from macports.
+    macports_prefix = sys.executable.split('/Library')[0]
+    # list of directories where to look for qt_menu.nib
+    dirs.extend( [
+        # Qt5 from MacPorts not compiled as framework.
+        os.path.join(macports_prefix, 'lib', 'Resources'),
+        # Qt5 from MacPorts compiled as framework.
+        os.path.join(macports_prefix, 'libexec', 'qt5-mac', 'lib',
+            'QtGui.framework', 'Versions', '5', 'Resources'),
+        # Qt5 installed into default location.
+        '/Library/Frameworks/QtGui.framework/Resources',
+        '/Library/Frameworks/QtGui.framework/Versions/5/Resources',
+        '/Library/Frameworks/QtGui.Framework/Versions/Current/Resources',
+    ])
+
+    # Copied verbatim from the Qt4 version with 4 changed to 5
+    # Qt5 from Homebrew compiled as framework
+    globpath = '/usr/local/Cellar/qt/5.*/lib/QtGui.framework/Versions/5/Resources'
+    qt_homebrew_dirs = glob.glob(globpath)
+    dirs += qt_homebrew_dirs
+
+    # Check directory existence
+    for d in dirs:
+        d = os.path.join(d, 'qt_menu.nib')
+        if os.path.exists(d):
+            menu_dir = d
+            break
+
+    if not menu_dir:
+        logger.error('Cannot find qt_menu.nib directory')
+    return menu_dir
+
+def qt5_qml_dir():
+    import subprocess
+    qmldir = subprocess.check_output(["qmake", "-query",
+                                      "QT_INSTALL_QML"]).strip()
+    if len(qmldir) == 0:
+        logger.error('Cannot find QT_INSTALL_QML directory, "qmake -query '
+                        + 'QT_INSTALL_QML" returned nothing')
+    if not os.path.exists(qmldir):
+        logger.error("Directory QT_INSTALL_QML: %s doesn't exist" % qmldir)
+    
+    # On Windows 'qmake -query' uses / as the path separator
+    # so change it to \\. 
+    if is_win:
+        import string
+        qmldir = string.replace(qmldir, '/', '\\')
+
+    return qmldir
+ 
+def qt5_qml_data(dir):
+    """Return Qml library dir formatted for data"""
+    qmldir = qt5_qml_dir()
+    return (os.path.join(qmldir, dir), 'qml')
+        
+def qt5_qml_plugins_binaries(dir):
+    """Return list of dynamic libraries formatted for mod.binaries."""
+    import string
+    binaries = []
+    qmldir = qt5_qml_dir()
+    dir = string.rstrip(dir, os.sep)
+    files = misc.dlls_in_subdirs(os.path.join(qmldir, dir))
+    if files is not None:
+        for f in files:
+            relpath = string.lstrip(f, qmldir)
+            instdir, file = os.path.split(relpath)
+            instdir = os.path.join("qml", instdir)
+            logger.debug("qt5_qml_plugins_binaries installing %s in %s"
+                         % (f, instdir) )
+                
+            binaries.append((
+                os.path.join(instdir, os.path.basename(f)),
+                    f, 'BINARY'))
+    return binaries    
 
 def django_dottedstring_imports(django_root_dir):
+    """
+    Get all the necessary Django modules specified in settings.py.
+
+    In the settings.py the modules are specified in several variables
+    as strings.
+    """
     package_name = os.path.basename(django_root_dir)
-    compat.setenv("DJANGO_SETTINGS_MODULE", "%s.settings" % package_name)
-    return eval_script("django-import-finder.py")
+    compat.setenv('DJANGO_SETTINGS_MODULE', '%s.settings' % package_name)
+
+    # Extend PYTHONPATH with parent dir of django_root_dir.
+    PyInstaller.__pathex__.append(misc.get_path_to_toplevel_modules(django_root_dir))
+    # Extend PYTHONPATH with django_root_dir.
+    # Many times Django users do not specify absolute imports in the settings module.
+    PyInstaller.__pathex__.append(django_root_dir)
+
+    ret = eval_script('django-import-finder.py')
+
+    # Unset environment variables again.
+    compat.unsetenv('DJANGO_SETTINGS_MODULE')
+
+    return ret
 
 
-def find_django_root(dir):
-    entities = set(os.listdir(dir))
-    if "manage.py" in entities and "settings.py" in entities and "urls.py" in entities:
-        return [dir]
+def django_find_root_dir():
+    """
+    Return path to directory (top-level Python package) that contains main django
+    files. Return None if no directory was detected.
+
+    Main Django project directory contain files like '__init__.py', 'settings.py'
+    and 'url.py'.
+
+    In Django 1.4+ the script 'manage.py' is not in the directory with 'settings.py'
+    but usually one level up. We need to detect this special case too.
+    """
+    # Get the directory with manage.py. Manage.py is supplied to PyInstaller as the
+    # first main executable script.
+    manage_py = sys._PYI_SETTINGS['scripts'][0]
+    manage_dir = os.path.dirname(os.path.abspath(manage_py))
+
+    # Get the Django root directory. The directory that contains settings.py and url.py.
+    # It could be the directory containig manage.py or any of its subdirectories.
+    settings_dir = None
+    files = set(os.listdir(manage_dir))
+    if 'settings.py' in files and 'urls.py' in files:
+        settings_dir = manage_dir
     else:
-        django_root_directories = []
-        for entity in entities:
-            path_to_analyze = os.path.join(dir, entity)
-            if os.path.isdir(path_to_analyze):
-                try:
-                    dir_entities = os.listdir(path_to_analyze)
-                except (IOError, OSError):
-                    # silently skip unreadable directories
-                    continue
-                if "manage.py" in dir_entities and "settings.py" in dir_entities and "urls.py" in dir_entities:
-                    django_root_directories.append(path_to_analyze)
-        return django_root_directories
+        for f in files:
+            if os.path.isdir(f):
+                subfiles = os.listdir(os.path.join(manage_dir, f))
+                # Subdirectory contains critical files.
+                if 'settings.py' in subfiles and 'urls.py' in subfiles:
+                    settings_dir = os.path.join(manage_dir, f)
+                    break  # Find the first directory.
+    
+    return settings_dir
 
 
 def matplotlib_backends():

@@ -1,22 +1,18 @@
+#-----------------------------------------------------------------------------
+# Copyright (c) 2013, PyInstaller Development Team.
 #
-# Various classes and functions to provide some backwards-compatibility
-# with previous versions of Python from 2.3 onward.
+# Distributed under the terms of the GNU General Public License with exception
+# for distributing bootloader.
 #
-# Copyright (C) 2011, Martin Zibricky
-#
-# This program is free software; you can redistribute it and/or
-# modify it under the terms of the GNU General Public License
-# as published by the Free Software Foundation; either version 2
-# of the License, or (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
+# The full license is in the file COPYING.txt, distributed with this software.
+#-----------------------------------------------------------------------------
+
+
+"""
+Various classes and functions to provide some backwards-compatibility
+with previous versions of Python from 2.3 onward.
+"""
+
 
 import dircache  # Module removed in Python 3
 import os
@@ -43,33 +39,6 @@ is_aix = sys.platform.startswith('aix')
 # Mac OS X is not considered as unix since there are many
 # platform specific details for Mac in PyInstaller.
 is_unix = is_linux or is_solar or is_aix
-
-
-# In debug mode a .log file is written.
-if __debug__:
-    import UserDict
-
-    class LogDict(UserDict.UserDict):
-        count = 0
-
-        def __init__(self, *args):
-            UserDict.UserDict.__init__(self, *args)
-            LogDict.count += 1
-            logfile = "logdict%s-%d.log" % (".".join(map(str, sys.version_info)),
-                                            LogDict.count)
-            if os.path.isdir("build"):
-                logfile = os.path.join("build", logfile)
-            self.logfile = open(logfile, "w")
-
-        def __setitem__(self, key, value):
-            self.logfile.write("%s: %s -> %s\n" % (key, self.data.get(key), value))
-            UserDict.UserDict.__setitem__(self, key, value)
-
-        def __delitem__(self, key):
-            self.logfile.write("  DEL %s\n" % key)
-            UserDict.UserDict.__delitem__(self, key)
-else:
-    LogDict = dict
 
 
 # Correct extension ending: 'c' or 'o'
@@ -101,6 +70,8 @@ _OLD_OPTIONS = [
     '-K', '--tk',
     '-C', '--configfile',
     '--skip-configure',
+    '-o', '--out',
+    '--buildpath',
     ]
 
 
@@ -137,7 +108,11 @@ else:
 
 
 # Some code parts needs to behave different when running in virtualenv.
-is_virtualenv = hasattr(sys, 'real_prefix')
+# 'real_prefix is for virtualenv,
+# 'base_prefix' is for PEP 405 venv (new in Python 3.3)
+venv_real_prefix = (getattr(sys, 'real_prefix', None) or
+                    getattr(sys, 'base_prefix', None))
+is_virtualenv = bool(venv_real_prefix)
 
 
 def architecture():
@@ -306,6 +281,38 @@ def exec_python_all(*args, **kwargs):
     """
     cmdargs, kwargs = __wrap_python(args, kwargs)
     return exec_command_all(*cmdargs, **kwargs)
+
+
+# The function os.getcwd() does not work with unicode paths on Windows.
+def getcwd():
+    """
+    Wrap os.getcwd()
+
+    On Windows return ShortPathName (8.3 filename) that contain only ascii
+    characters.
+    """
+    cwd = os.getcwd()
+    # TODO os.getcwd should work properly with py3 on windows.
+    if is_win:
+        try:
+            unicode(cwd)
+        except UnicodeDecodeError:
+            # Do conversion to ShortPathName really only in case 'cwd' is not
+            # ascii only - conversion to unicode type cause this unicode error.
+            try:
+                import win32api
+                cwd = win32api.GetShortPathName(cwd)
+            except ImportError:
+                pass
+    return cwd
+
+
+def expand_path(path):
+    """
+    Replace initial tilde '~' in path with user's home directory and also
+    expand environment variables (${VARNAME} - Unix, %VARNAME% - Windows).
+    """
+    return os.path.expandvars(os.path.expanduser(path))
 
 
 # Obsolete command line options.

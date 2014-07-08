@@ -1,56 +1,42 @@
 /*
- * Fuctions related to PyInstaller archive embedded in executable.
+ * ****************************************************************************
+ * Copyright (c) 2013, PyInstaller Development Team.
+ * Distributed under the terms of the GNU General Public License with exception
+ * for distributing bootloader.
  *
- * Copyright (C) 2012, Martin Zibricky
- * Copyright (C) 2005-2011, Giovanni Bajo
- * Based on previous work under copyright (c) 2002 McMillan Enterprises, Inc.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * In addition to the permissions in the GNU General Public License, the
- * authors give you unlimited permission to link or embed the compiled
- * version of this file into combinations with other programs, and to
- * distribute those combinations without any restriction coming from the
- * use of this file. (The General Public License restrictions do apply in
- * other respects; for example, they cover modification of the file, and
- * distribution when not linked into a combine executable.)
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+ * The full license is in the file COPYING.txt, distributed with this software.
+ * ****************************************************************************
  */
 
-// TODO leave only necessary header includes.
-#include <stdio.h>
-#ifdef WIN32
- #include <windows.h>
- #include <direct.h>
- #include <process.h>
- #include <io.h>
-#else
- #include <unistd.h>
- #include <fcntl.h>
- #include <dlfcn.h>
- #include <dirent.h>
- #include <stdarg.h>
-#endif
-#include <sys/types.h>
-#include <sys/stat.h>
-#include "launch.h"
-#include <string.h>
-#include "zlib.h"
 
+/*
+ * Fuctions related to PyInstaller archive embedded in executable.
+ */
+
+
+#ifdef WIN32
+// TODO verify windows includes
+    #include <winsock.h>  // ntohl
+#else
+    #include <limits.h>  // PATH_MAX - not available on windows.
+    #include <netinet/in.h>  // ntohl
+    #include <sys/stat.h>  // fchmod
+#endif
+#include <stddef.h>  // ptrdiff_t
+#include <stdio.h>
+
+
+/* PyInstaller headers. */
+#include "zlib.h"
+#include "stb.h"
+#include "pyi_global.h"
+#include "pyi_archive.h"
 #include "pyi_utils.h"
 #include "pyi_python.h"
-#include "pyi_archive.h"
+
+
+/* Magic number to verify archive data are bundled correctly. */
+#define MAGIC "MEI\014\013\012\013\016"
 
 
 /*
@@ -131,35 +117,8 @@ unsigned char *pyi_arch_extract(ARCHIVE_STATUS *status, TOC *ptoc)
 	    OTHERERROR("Could not read from file\n");
 	    return NULL;
 	}
-	if (ptoc->cflag == '\2') {
-        static PyObject *AES = NULL;
-		PyObject *func_new;
-		PyObject *aes_dict;
-		PyObject *aes_obj;
-		PyObject *ddata;
-		long block_size;
-		char *iv;
 
-		if (!AES)
-			AES = PI_PyImport_ImportModule("AES");
-		aes_dict = PI_PyModule_GetDict(AES);
-		func_new = PI_PyDict_GetItemString(aes_dict, "new");
-		block_size = PI_PyInt_AsLong(PI_PyDict_GetItemString(aes_dict, "block_size"));
-		iv = malloc(block_size);
-		memset(iv, 0, block_size);
-
-		aes_obj = PI_PyObject_CallFunction(func_new, "s#Os#",
-			data, 32,
-			PI_PyDict_GetItemString(aes_dict, "MODE_CFB"),
-			iv, block_size);
-
-		ddata = PI_PyObject_CallMethod(aes_obj, "decrypt", "s#", data+32, ntohl(ptoc->len)-32);
-		memcpy(data, PI_PyString_AsString(ddata), ntohl(ptoc->len)-32);
-		Py_DECREF(aes_obj);
-		Py_DECREF(ddata);
-		VS("decrypted %s\n", ptoc->name);
-	}
-	if (ptoc->cflag == '\1' || ptoc->cflag == '\2') {
+	if (ptoc->cflag == '\1') {
 		tmp = decompress(data, ptoc);
 		free(data);
 		data = tmp;
@@ -181,6 +140,7 @@ int pyi_arch_extract2fs(ARCHIVE_STATUS *status, TOC *ptoc)
 	FILE *out;
 	unsigned char *data = pyi_arch_extract(status, ptoc);
 
+    /* Create tmp dir _MEIPASSxxx. */
     if (pyi_create_temp_path(status) == -1){
         return -1;
     }
@@ -196,10 +156,11 @@ int pyi_arch_extract2fs(ARCHIVE_STATUS *status, TOC *ptoc)
 #ifndef WIN32
 		fchmod(fileno(out), S_IRUSR | S_IWUSR | S_IXUSR);
 #endif
-		fclose(out);
+        fclose(out);
 	}
 	free(data);
-	return 0;
+
+    return 0;
 }
 
 
@@ -225,6 +186,49 @@ static int pyi_arch_check_cookie(ARCHIVE_STATUS *status, int filelen)
 }
 
 
+static int findDigitalSignature(ARCHIVE_STATUS * const status)
+{
+#ifdef WIN32
+	/* There might be a digital signature attached. Let's see. */
+	char buf[2];
+	int offset = 0, signature_offset = 0;
+	fseek(status->fp, 0, SEEK_SET);
+	fread(buf, 1, 2, status->fp);
+	if (!(buf[0] == 'M' && buf[1] == 'Z'))
+		return -1;
+	/* Skip MSDOS header */
+	fseek(status->fp, 60, SEEK_SET);
+	/* Read offset to PE header */
+	fread(&offset, 4, 1, status->fp);
+	fseek(status->fp, offset+24, SEEK_SET);
+        fread(buf, 2, 1, status->fp);
+        if (buf[0] == 0x0b && buf[1] == 0x01) {
+          /* 32 bit binary */
+          signature_offset = 152;
+        }
+        else if (buf[0] == 0x0b && buf[1] == 0x02) {
+          /* 64 bit binary */
+          signature_offset = 168;
+        }
+        else {
+          /* Invalid magic value */
+          VS("LOADER: Could not find a valid magic value (was %x %x).\n", (unsigned int) buf[0], (unsigned int) buf[1]);
+          return -1;
+        }
+
+	/* Jump to the fields that contain digital signature info */
+	fseek(status->fp, offset+signature_offset, SEEK_SET);
+	fread(&offset, 4, 1, status->fp);
+	if (offset == 0)
+		return -1;
+  VS("LOADER: %s contains a digital signature\n", status->archivename);
+	return offset;
+#else
+	return -1;
+#endif
+}
+
+
 /*
  * Open the archive.
  * Sets f_archiveFile, f_pkgstart, f_tocbuff and f_cookie.
@@ -235,11 +239,11 @@ int pyi_arch_open(ARCHIVE_STATUS *status)
 	int i;
 #endif
 	int filelen;
-    VS("archivename is %s\n", status->archivename);
+    VS("LOADER: archivename is %s\n", status->archivename);
 	/* Physically open the file */
-	status->fp = fopen(status->archivename, "rb");
+	status->fp = stb_fopen(status->archivename, "rb");
 	if (status->fp == NULL) {
-		VS("Cannot open archive: %s\n", status->archivename);
+		VS("LOADER: Cannot open archive: %s\n", status->archivename);
 		return -1;
 	}
 
@@ -249,7 +253,7 @@ int pyi_arch_open(ARCHIVE_STATUS *status)
 
 	if (pyi_arch_check_cookie(status, filelen) < 0)
 	{
-		VS("%s does not contain an embedded package\n", status->archivename);
+		VS("LOADER: %s does not contain an embedded package\n", status->archivename);
 #ifndef WIN32
     return -1;
 #else
@@ -267,12 +271,15 @@ int pyi_arch_open(ARCHIVE_STATUS *status)
 		}
 		if (i == 8)
 		{
-			VS("%s does not contain an embedded package, even skipping the signature\n", status->archivename);
+			VS("LOADER: %s does not contain an embedded package, even skipping the signature\n", status->archivename);
 			return -1;
 		}
-		VS("package found skipping digital signature in %s\n", status->archivename);
+		VS("LOADER: package found skipping digital signature in %s\n", status->archivename);
 #endif
 	}
+
+    /* Set the flag that Python library was not loaded yet. */
+    status->is_pylib_loaded = false;
 
 	/* From the cookie, calculate the archive start */
 	status->pkgstart = filelen - ntohl(status->cookie.len);
@@ -308,34 +315,34 @@ int pyi_arch_open(ARCHIVE_STATUS *status)
  */
 int pyi_arch_set_paths(ARCHIVE_STATUS *status, char const * archivePath, char const * archiveName)
 {
-#ifdef WIN32
-	char *p;
-#endif
 	/* Get the archive Path */
 	strcpy(status->archivename, archivePath);
 	strcat(status->archivename, archiveName);
 
 	/* Set homepath to where the archive is */
 	strcpy(status->homepath, archivePath);
-#ifdef WIN32
-    /* Replace backslashes with forward slashes. */
-    // TODO eliminate the need for this conversion and homepathraw and temppathraw
-	strcpy(status->homepathraw, archivePath);
-	for ( p = status->homepath; *p; p++ )
-		if (*p == '\\')
-			*p = '/';
-#endif
 
     /*
      * Initial value of mainpath is homepath. It might be overriden
      * by temppath if it is available.
      */
     status->has_temp_directory = false;
-#ifdef WIN32
-	strcpy(status->mainpath, status->homepathraw);
-#else
 	strcpy(status->mainpath, status->homepath);
-#endif
+
+	return 0;
+}
+
+
+/* Setup the archive with python modules. (this always needs to be done) */
+int pyi_arch_setup(ARCHIVE_STATUS *status, char const * archivePath, char  const * archiveName)
+{
+	/* Set up paths */
+	if (pyi_arch_set_paths(status, archivePath, archiveName))
+		return -1;
+
+	/* Open the archive */
+	if (pyi_arch_open(status))
+		return -1;
 
 	return 0;
 }
@@ -365,3 +372,20 @@ int pyi_arch_get_pyversion(ARCHIVE_STATUS *status)
 {
 	return ntohl(status->cookie.pyvers);
 }
+
+
+/*
+ * Free memory allocated for archive status.
+ */
+void pyi_arch_status_free_memory(ARCHIVE_STATUS *archive_status)
+{
+    if (archive_status != NULL) {
+        VS("LOADER: Freeing archive status for %s\n", archive_status->archivename);
+        /* Free the TOC memory from the archive status first. */
+        if (archive_status->tocbuff != NULL) {
+            free(archive_status->tocbuff);
+        }
+        free(archive_status);
+    }
+}
+
