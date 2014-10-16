@@ -65,6 +65,9 @@ HIDDENIMPORTS = []
 
 rthooks = {}
 
+# place where the loader modules and initialization scripts live
+_init_code_path = os.path.join(HOMEPATH, 'PyInstaller', 'loader')
+_fake_code_path = os.path.join(HOMEPATH, 'PyInstaller', 'fake')
 
 def _save_data(filename, data):
     dirname = os.path.dirname(filename)
@@ -258,7 +261,7 @@ def _rmtree(path):
         choice = 'y'
     elif sys.stdout.isatty():
         choice = raw_input('WARNING: The output directory "%s" and ALL ITS '
-                           'CONTENTS will be REMOVED! Continue? (y/n)' % path)
+                           'CONTENTS will be REMOVED! Continue? (y/n) ' % path)
     else:
         raise SystemExit('Error: The output directory "%s" is not empty. '
                          'Please remove all its contents or use the '
@@ -369,7 +372,7 @@ class Analysis(Target):
         ))
 
     def __init__(self, scripts=None, pathex=None, hiddenimports=None,
-                 hookspath=None, excludes=None, runtime_hooks=[]):
+                 hookspath=None, excludes=None, runtime_hooks=[], cipher=None):
         """
         scripts
                 A list of scripts specified as file names.
@@ -393,7 +396,6 @@ class Analysis(Target):
         sys._PYI_SETTINGS['scripts'] = scripts
 
         # Include initialization Python code in PyInstaller analysis.
-        _init_code_path = os.path.join(HOMEPATH, 'PyInstaller', 'loader')
         self.inputs = [
             os.path.join(_init_code_path, '_pyi_bootstrap.py'),
             os.path.join(_init_code_path, 'pyi_importers.py'),
@@ -435,6 +437,31 @@ class Analysis(Target):
         # Custom runtime hook files that should be included and started before
         # any existing PyInstaller runtime hooks.
         self.custom_runtime_hooks = runtime_hooks
+
+        if cipher:
+            logger.info('Will encrypt Python bytecode with key: %s', cipher.key)
+
+            # Create a Python module which contains the decryption key which will
+            # be used at runtime by pyi_crypto.PyiBlockCipher.
+            pyi_crypto_key_path = os.path.join(WORKPATH, 'pyi_crypto_key.py')
+
+            with open(pyi_crypto_key_path, 'w') as f:
+                f.write('key = %r\n' % cipher.key)
+
+            # Compile the module so that it ends up in the CArchive and can be
+            # imported by the bootstrap script.
+            import py_compile
+            py_compile.compile(pyi_crypto_key_path)
+
+            logger.info('Adding dependency on pyi_crypto and pyi_crypto_key')
+
+            from PyInstaller.loader import pyi_crypto
+            self.hiddenimports.append(pyi_crypto.HIDDENIMPORT)
+
+            pyi_crypto_path = os.path.join(_init_code_path, 'pyi_crypto.py')
+
+            config['PYZ_dependencies'].append(('pyi_crypto', pyi_crypto_path + 'c', 'PYMODULE'))
+            config['PYZ_dependencies'].append(('pyi_crypto_key', pyi_crypto_key_path + 'c', 'PYMODULE'))
 
         self.excludes = excludes
         self.scripts = TOC()
@@ -496,7 +523,6 @@ class Analysis(Target):
         from PyInstaller import hooks
 
         # Python scripts for analysis.
-        _init_code_path = os.path.join(HOMEPATH, 'PyInstaller', 'loader')
         scripts = [
             os.path.join(_init_code_path, '_pyi_bootstrap.py'),
         ]
@@ -649,7 +675,7 @@ class Analysis(Target):
             if mod is None:
                 continue
 
-            datas.extend(mod.datas)
+            datas.extend(mod.pyinstaller_datas)
 
             if isinstance(mod, PyInstaller.depend.modules.BuiltinModule):
                 pass
@@ -657,15 +683,19 @@ class Analysis(Target):
                 binaries.append((mod.__name__, mod.__file__, 'EXTENSION'))
                 # allows hooks to specify additional dependency
                 # on other shared libraries loaded at runtime (by dlopen)
-                binaries.extend(mod.binaries)
+                binaries.extend(mod.pyinstaller_binaries)
             elif isinstance(mod, (PyInstaller.depend.modules.PkgInZipModule, PyInstaller.depend.modules.PyInZipModule)):
                 zipfiles.append(("eggs/" + os.path.basename(str(mod.owner)),
                                  str(mod.owner), 'ZIPFILE'))
+            elif isinstance(mod, PyInstaller.depend.modules.NamespaceModule):
+                pure.append((modnm,
+                             os.path.join(_fake_code_path, 'namespace', '__init__.pyc'),
+                             'PYMODULE'))
             else:
                 # mf.PyModule instances expose a list of binary
                 # dependencies, most probably shared libraries accessed
                 # via ctypes. Add them to the overall required binaries.
-                binaries.extend(mod.binaries)
+                binaries.extend(mod.pyinstaller_binaries)
                 if modnm != '__main__':
                     pure.append((modnm, mod.__file__, 'PYMODULE'))
 
@@ -676,7 +706,6 @@ class Analysis(Target):
             depmanifest.writeprettyxml()
         self._check_python_library(binaries)
         if zipfiles:
-            _init_code_path = os.path.join(HOMEPATH, 'PyInstaller', 'loader')
             scripts.insert(-1, ('_pyi_egg_install.py', os.path.join(_init_code_path, '_pyi_egg_install.py'), 'PYSOURCE'))
         # Add runtime hooks just before the last script (which is
         # the entrypoint of the application).
@@ -746,7 +775,7 @@ class PYZ(Target):
     """
     typ = 'PYZ'
 
-    def __init__(self, toc, name=None, level=9):
+    def __init__(self, toc, name=None, level=9, cipher=None):
         """
         toc
                 A TOC (Table of Contents), normally an Analysis.pure?
@@ -756,6 +785,8 @@ class PYZ(Target):
         level
                 The Zlib compression level to use. If 0, the zlib module is
                 not required.
+        cipher
+                The block cipher that will be used to encrypt Python bytecode.
         """
         Target.__init__(self)
         self.toc = toc
@@ -765,6 +796,8 @@ class PYZ(Target):
         # Level of zlib compression.
         self.level = level
         self.dependencies = compile_pycos(config['PYZ_dependencies'])
+        # Encryption
+        self.cipher = cipher
         self.__postinit__()
 
     GUTS = (('name', _check_guts_eq),
@@ -785,7 +818,7 @@ class PYZ(Target):
 
     def assemble(self):
         logger.info("building PYZ (ZlibArchive) %s", os.path.basename(self.out))
-        pyz = pyi_archive.ZlibArchive(level=self.level)
+        pyz = pyi_archive.ZlibArchive(level=self.level, cipher=self.cipher)
         toc = self.toc - config['PYZ_dependencies']
         pyz.build(self.name, toc)
         _save_data(self.out, (self.name, self.level, self.toc))
@@ -1111,9 +1144,6 @@ class EXE(Target):
         """
         Target.__init__(self)
 
-        # TODO could be 'append_pkg' removed? It seems not to be used anymore.
-        self.append_pkg = kwargs.get('append_pkg', True)
-
         # Available options for EXE in .spec files.
         self.exclude_binaries = kwargs.get('exclude_binaries', False)
         self.console = kwargs.get('console', True)
@@ -1124,6 +1154,9 @@ class EXE(Target):
         self.manifest = kwargs.get('manifest', None)
         self.resources = kwargs.get('resources', [])
         self.strip = kwargs.get('strip', False)
+        # If ``append_pkg`` is false, the archive will not be appended
+        # to the exe, but copied beside it.
+        self.append_pkg = kwargs.get('append_pkg', True)
 
         if config['hasUPX']: 
            self.upx = kwargs.get('upx', False)
@@ -1411,7 +1444,11 @@ class COLLECT(Target):
                                  upx=(self.upx_binaries and (is_win or is_cygwin)), 
                                  dist_nm=inm)
             if typ != 'DEPENDENCY':
-                shutil.copy2(fnm, tofnm)
+                shutil.copy(fnm, tofnm)
+                try:
+                    shutil.copystat(fnm, tofnm)
+                except OSError:
+                    logger.warn("failed to copy flags of %s", fnm)
             if typ in ('EXTENSION', 'BINARY'):
                 os.chmod(tofnm, 0755)
         _save_data(self.out,
@@ -1447,6 +1484,8 @@ class BUNDLE(Target):
         self.toc = TOC()
         self.strip = False
         self.upx = False
+
+        self.info_plist = kws.get('info_plist', None)
 
         for arg in args:
             if isinstance(arg, EXE):
@@ -1521,6 +1560,11 @@ class BUNDLE(Target):
                            "LSBackgroundOnly": "1",
 
                            }
+
+        # Merge info_plist settings from spec file
+        if isinstance(self.info_plist, dict) and self.info_plist:
+            info_plist_dict = dict(info_plist_dict.items() + self.info_plist.items())
+
         info_plist = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1584,8 +1628,8 @@ class TOC(UserList.UserList):
     def append(self, tpl):
         try:
             fn = tpl[0]
-            if tpl[2] == "BINARY":
-                # Normalize the case for binary files only (to avoid duplicates
+            if tpl[2] in ["BINARY", "DATA"]:
+                # Normalize the case for binary and data files only (to avoid duplicates
                 # for different cases under Windows). We can't do that for
                 # Python files because the import semantic (even at runtime)
                 # depends on the case.

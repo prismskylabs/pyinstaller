@@ -46,18 +46,27 @@ def py_arch():
     return mapping[arch]
 
 
+# Pick a PyCrypto version to use to test bytecode encryption. This is typically
+# used in conjunction with continuous integration.
+if 'PYCRYPTO_VERSION' in os.environ:
+    pycrypto = 'PyCrypto==%s' % os.environ['PYCRYPTO_VERSION']
+else:
+    pycrypto = 'PyCrypto'
+
+
 _PACKAGES = {
     'docutils': ['docutils'],
     'jinja2': ['jinja2'],
     'sphinx': ['sphinx'],
     'pytz': ['pytz'],
+    'zope.interface': ['zope.interface'],
     'IPython': ['IPython'],
     # 'modulename': 'pypi_name_or_url_or_path'
     'MySQLdb': ['MySQL-python-*%s-py%s.exe' % (py_arch(), PYVER)],
     'numpy': ['numpy-unoptimized-*%s-py%s.exe' % (py_arch(), PYVER)],
     'PIL': ['PIL-*%s-py%s.exe' % (py_arch(), PYVER)],
     'psycopg2': ['psycopg2-*%s-py%s.exe' % (py_arch(), PYVER)],
-    #'pycrypto': ['pycrypto'],
+    'PyCrypto': [pycrypto],
     'pyodbc': ['pyodbc'],
     #'simplejson': ['simplejson'],
     'sqlalchemy': ['SQLAlchemy-*%s-py%s.exe' % (py_arch(), PYVER)],
