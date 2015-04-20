@@ -35,4 +35,4 @@ def hook(mod):
             # TODO fix this hook to use attribute 'binaries'.
             mod.pyinstaller_binaries.append((name, bundled[0], 'BINARY'))
 
-    return mod
+    return modprism
