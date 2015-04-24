@@ -18,6 +18,7 @@ from PyInstaller.hooks.hookutils import collect_submodules
 
 hiddenimports = ['zmq.utils.garbage']
 hiddenimports.extend(collect_submodules('zmq.backend'))
+hiddenimports.extend(collect_submodules('zmq.backend.cython'))
 
 def hook(mod):
     # If PyZMQ provides its own copy of libzmq or libsodium, add it to the
