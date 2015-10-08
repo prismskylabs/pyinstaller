@@ -26,7 +26,7 @@ def hook(mod):
     # For predictable behavior, the libzmq search here must be equivalent
     # to the search in zmq/__init__.py.
     zmq_directory = os.path.dirname(mod.__file__)
-    for libname in ('libzmq', 'libsodium', 'zmq'):
+    for libname in ('libzmq', 'libsodium', 'zmq', 'zmq.libzmq'):
         bundled = glob.glob(os.path.join(zmq_directory,
                                          libname + '*.{pyd,so,dll,dylib}*'))
         if bundled:
