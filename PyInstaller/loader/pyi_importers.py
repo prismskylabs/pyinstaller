@@ -417,6 +417,8 @@ class CExtensionImporter(object):
             if module is None:
                 filename = pyi_os_path.os_path_join(sys.prefix, fullname + self._suffix)
                 fp = open(filename, 'rb')
+                print "Fullname: {}, filename: {}, Ext: {}".format(fullname, filename,
+                                                                   self._c_ext_tuple)
                 module = imp.load_module(fullname, fp, filename, self._c_ext_tuple)
                 # Set __file__ attribute.
                 if hasattr(module, '__setattr__'):
